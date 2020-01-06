@@ -1,0 +1,355 @@
+---
+title: Predicting Sale Prices for Houses
+author:
+  - name: Simeng Shen
+    affil: 1
+  - name: Qiyu Dai
+    affil: 1
+affiliation:
+  - num: 1
+    address: Stats 140, University of California, Los Angeles 
+column_numbers: 3
+output: 
+  posterdown::posterdown_html:
+    self_contained: FALSE
+primary_colour: "#2774AE"
+secondary_colour: "#FFD100"
+accent_colour: "#FFD100"
+body_textsize: "55px"
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# Introduction
+
+The real estate market is a constantly fluctuated market that contains a large volume of trades. The sheer knowledge required to price a house is so high that usually requires people to hire professional traders to help. The purpose of this project is to try to predict market prices for houses using various aspects of the house, so that the owners can have a better idea for their properties. We did many detailed exploratory data analysis for the features, then conducted three models to best predict the pricing.
+
+
+
+
+
+
+
+# Objectives
+
+1. Exploratory analysis to find our the most important features in determining prices. 
+
+2. Build models that best predicts housing prices.
+
+
+
+
+ 
+
+# Methods
+
+1. Glancing through the features first, variables tha related to bedroom numbers, quality, year built and neiborhood stand out. So we did more analysis on those features to find out any potential relationships with sale price.
+
+2. Correlation plot to gain visual understanding of the relationship between variables and sale price. Overall quality and above ground living area stand out. So we did more analysis on them.
+
+3. Sale price is very right skewed. So we take the log of sale price to gain a normal distribution for better modeling.
+
+4. We tried Lasso regression, XGB, and GBM after feature engineering. Lasso surprisingly performed the best. However, we decided to use a combination of the three models as the final model. Simply using the average of the three models only performed slightly better than the individuals. So we used weighted average, with Lasso having 0.6, GBM having 0.1, and XGBoost having 0.3 of the weight. The outcome yielded a much better result in the end. 
+
+
+
+
+
+
+
+
+# Exploratory Analysis through SLR
+
+```{r, include= FALSE}
+library(corrplot)
+library(data.table)
+library(ggplot2)
+library(gridExtra)
+# load.libraries <- c('data.table', 'testthat', 'gridExtra', 'corrplot', 'GGally', 'ggplot2', 'e1071', 'dplyr')
+# install.lib <- load.libraries[!load.libraries %in% installed.packages()]
+# for(libs in install.lib) install.packages(libs, dependences = TRUE)
+# sapply(load.libraries, require, character = TRUE)
+train <- fread('train.csv',colClasses=c('MiscFeature' = "character", 'PoolQC' = 'character', 'Alley' = 'character'))
+test <- fread('test.csv' ,colClasses=c('MiscFeature' = "character", 'PoolQC' = 'character', 'Alley' = 'character'))
+numeric_var <- names(train)[which(sapply(train, is.numeric))]
+
+train_cont <- train[,.SD,.SDcols = numeric_var]
+
+```
+
+```{r,include=FALSE}
+correlations <- cor(na.omit(train_cont[,-1, with = FALSE]))
+
+# correlations
+row_indic <- apply(correlations, 1, function(x) sum(x > 0.3 | x < -0.3) > 1)
+
+correlations<- correlations[row_indic ,row_indic ]
+corrplot(correlations, method="square")
+
+```
+
+```{r,out.width='80%', fig.align='center', fig.cap='Features vs. SalePrice', fig.height=5}
+
+
+plotCorr <- function(data_in, i){
+  data <- data.frame(x = data_in[[i]], SalePrice = data_in$SalePrice)
+  p <- ggplot(data, aes(x = x, y = SalePrice)) + geom_point(shape = 1, na.rm = TRUE) + geom_smooth(method = lm ) + xlab(paste0(colnames(data_in)[i], '\n', 'R-Squared: ', round(cor(data_in[[i]], data$SalePrice, use = 'complete.obs'), 2))) + theme_light()
+  return(suppressWarnings(p))
+}
+
+
+highcorr <- c(names(correlations[,'SalePrice'])[which(correlations[,'SalePrice'] > 0.5)], names(correlations[,'SalePrice'])[which(correlations[,'SalePrice'] < -0.2)])
+ 
+data_corr <- train[,highcorr, with = FALSE]
+doPlots <- function(data_in, fun, ii, ncol=3) {
+  pp <- list()
+  for (i in ii) {
+    p <- fun(data_in=data_in, i=i)
+    pp <- c(pp, list(p))
+  }
+  do.call("grid.arrange", c(pp, ncol=ncol))
+}
+
+
+doPlots(data_corr, fun = plotCorr, ii = 1:6)
+```
+After creating correlation plots, overall quality, year built, year remodeled, total basement area, first floor area, and general living area are the most correlated with sale price. Therefore, we decided to fit linear regressions for each one of the predictors. It is very obvious that there are a lot of outliers toward the ends of each variable. Thus, next step is to clean out the outliers, and feature engineering to generate more useful variables to better predict the price.
+
+
+
+
+# Models and Findings
+
+
+```{r,include=FALSE}
+train=read.csv("train.csv",stringsAsFactors = FALSE)
+
+qplot(train$GrLivArea,train$SalePrice,main="With Outliers")
+train<-train[-which(train$GrLivArea>4000 & train$SalePrice<300000),]
+qplot(train$GrLivArea,train$SalePrice,main="Without Outliers")
+
+## Plot histogram of SalePrice Variable - Right skewed
+qplot(SalePrice,data=train,bins=50,main="Right skewed distribution")
+
+## Log transformation of the target variable
+train$SalePrice <- log(train$SalePrice + 1)
+
+## Normal distribution after transformation
+qplot(SalePrice,data=train,bins=50,main="Normal distribution after log transformation")
+```
+
+
+```{r,include=FALSE}
+colSums(is.na(train))
+
+## fill NA with "None" 
+for(x in c("Alley","PoolQC","MiscFeature","Fence","FireplaceQu","GarageType","GarageFinish","GarageQual",'GarageCond','BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1', 'BsmtFinType2',"MasVnrType")){
+        train[is.na(train[,x]),x]="None"
+}
+
+temp=aggregate(LotFrontage~Neighborhood,data=train,median)
+temp2=c()
+for(str in train$Neighborhood[is.na(train$LotFrontage)]){temp2=c(temp2,which(temp$Neighborhood==str))}
+train$LotFrontage[is.na(train$LotFrontage)]=temp[temp2,2]
+
+## fill NA with 0
+for(col in c('GarageYrBlt', 'GarageArea', 'GarageCars','BsmtFinSF1', 'BsmtFinSF2', 'BsmtUnfSF','TotalBsmtSF', 'BsmtFullBath', 'BsmtHalfBath',"MasVnrArea")){
+        train[is.na(train[,col]),col]=0
+}
+
+train$MSZoning[is.na(train$MSZoning)]="RL"
+
+train=train[,-9]
+
+train$Functional[is.na(train$Functional)]="Typ"
+train$Electrical[is.na(train$Electrical)]="SBrkr"
+train$KitchenQual[is.na(train$KitchenQual)]="TA"
+train$SaleType[is.na(train$SaleType)]="WD"
+train$Exterior1st[is.na(train$Exterior1st)]="VinylSd"
+train$Exterior2nd[is.na(train$Exterior2nd)]="VinylSd"
+
+colSums(is.na(train))
+```
+
+
+```{r,include=FALSE}
+train$MSSubClass=as.character(train$MSSubClass)
+train$OverallCond=as.character(train$OverallCond)
+train$YrSold=as.character(train$YrSold)
+train$MoSold=as.character(train$MoSold)
+
+cols = c('FireplaceQu', 'BsmtQual', 'BsmtCond', 'GarageQual', 'GarageCond', 'ExterQual', 'ExterCond','HeatingQC', 'PoolQC', 'KitchenQual', 'BsmtFinType1', 'BsmtFinType2', 'Functional', 'Fence', 'BsmtExposure', 'GarageFinish', 'LandSlope','LotShape', 'PavedDrive', 'Street', 'Alley', 'CentralAir', 'MSSubClass', 'OverallCond', 'YrSold', 'MoSold')
+
+FireplaceQu=c('None','Po','Fa','TA','Gd','Ex')
+BsmtQual=c('None','Po','Fa','TA','Gd','Ex')
+BsmtCond=c('None','Po','Fa','TA','Gd','Ex')
+GarageQual=c('None','Po','Fa','TA','Gd','Ex')
+GarageCond=c('None','Po','Fa','TA','Gd','Ex')
+ExterQual=c('Po','Fa','TA','Gd','Ex')
+ExterCond=c('Po','Fa','TA','Gd','Ex')
+HeatingQC=c('Po','Fa','TA','Gd','Ex')
+PoolQC=c('None','Fa','TA','Gd','Ex')
+KitchenQual=c('Po','Fa','TA','Gd','Ex')
+BsmtFinType1=c('None','Unf','LwQ','Rec','BLQ','ALQ','GLQ')
+BsmtFinType2=c('None','Unf','LwQ','Rec','BLQ','ALQ','GLQ')
+Functional=c('Sal','Sev','Maj2','Maj1','Mod','Min2','Min1','Typ')
+Fence=c('None','MnWw','GdWo','MnPrv','GdPrv')
+BsmtExposure=c('None','No','Mn','Av','Gd')
+GarageFinish=c('None','Unf','RFn','Fin')
+LandSlope=c('Sev','Mod','Gtl')
+LotShape=c('IR3','IR2','IR1','Reg')
+PavedDrive=c('N','P','Y')
+Street=c('Pave','Grvl')
+Alley=c('None','Pave','Grvl')
+MSSubClass=c('20','30','40','45','50','60','70','75','80','85','90','120','150','160','180','190')
+OverallCond=NA
+MoSold=NA
+YrSold=NA
+CentralAir=NA
+levels=list(FireplaceQu, BsmtQual, BsmtCond, GarageQual, GarageCond, ExterQual, ExterCond,HeatingQC, PoolQC, KitchenQual, BsmtFinType1, BsmtFinType2, Functional, Fence, BsmtExposure, GarageFinish, LandSlope,LotShape, PavedDrive, Street, Alley, CentralAir, MSSubClass, OverallCond, YrSold, MoSold)
+i=1
+for (c in cols){
+        if(c=='CentralAir'|c=='OverallCond'|c=='YrSold'|c=='MoSold'){
+                train[,c]=as.numeric(factor(train[,c]))}
+        else
+                train[,c]=as.numeric(factor(train[,c],levels=levels[[i]]))
+i=i+1
+        }
+
+
+
+train$TotalSF=train$TotalBsmtSF+train$X1stFlrSF+train$X2ndFlrSF
+```
+
+
+```{r,include=FALSE}
+# first get data type for each feature
+feature_classes <- sapply(names(train),function(x){class(train[[x]])})
+numeric_feats <-names(feature_classes[feature_classes != "character"])
+
+# get names of categorical features
+categorical_feats <- names(feature_classes[feature_classes == "character"])
+
+# use caret dummyVars function for hot one encoding for categorical features
+library(caret)
+dummies <- dummyVars(~.,train[categorical_feats])
+categorical_1_hot <- predict(dummies,train[categorical_feats])
+
+## Determine skew for each numeric feature
+library(moments)
+library(MASS)
+skewed_feats <- sapply(numeric_feats,function(x){skewness(train[[x]],na.rm=TRUE)})
+
+## Keep only features that exceed a threshold (0.75) for skewness
+skewed_feats <- skewed_feats[abs(skewed_feats) > 0.75]
+
+## Transform skewed features with boxcox transformation
+for(x in names(skewed_feats)) {
+  bc=BoxCoxTrans(train[[x]],lambda = .15)
+  train[[x]]=predict(bc,train[[x]])
+  #train[[x]] <- log(train[[x]] + 1)
+}
+
+train <- cbind(train[numeric_feats],categorical_1_hot)
+
+dim(train)
+```
+
+
+```{r,include=FALSE}
+set.seed(222)
+inTrain<-createDataPartition(y=train$SalePrice,p=.7,list=FALSE)
+Training<-train[inTrain,]
+Validation<-train[-inTrain,]
+
+library(glmnet)
+library(Metrics)
+set.seed(123)
+cv_lasso=cv.glmnet(as.matrix(Training[,-60]),Training[,60])
+
+## Predictions
+preds<-predict(cv_lasso,newx=as.matrix(Validation[,-60]),s="lambda.min")
+lassormse<-rmse(Validation$SalePrice,preds)
+
+library(iterators)
+library(parallel)
+library(doMC)
+set.seed(222)
+registerDoMC(16)
+CARET.TRAIN.CTRL <-trainControl(method="repeatedcv",number=5,repeats=5,verboseIter=FALSE,allowParallel=TRUE)
+gbmFit<-train(SalePrice~.,method="gbm",metric="RMSE",maximize=FALSE,trControl=CARET.TRAIN.CTRL,tuneGrid=expand.grid(n.trees=(4:10)*50,interaction.depth=c(5),shrinkage=c(0.05),n.minobsinnode=c(10)),data=Training,verbose=FALSE)
+
+##print(gbmFit)
+
+## Predictions
+preds1 <- predict(gbmFit,newdata=Validation)
+gbmrmse<-rmse(Validation$SalePrice,preds1)
+
+
+library(xgboost)
+set.seed(123)
+## Model parameters trained using xgb.cv function
+xgbFit=xgboost(data=as.matrix(Training[,-60]),nfold=5,label=as.matrix(Training$SalePrice),nrounds=2200,verbose=FALSE,objective='reg:linear',eval_metric='rmse',nthread=8,eta=0.01,gamma=0.0468,max_depth=6,min_child_weight=1.7817,subsample=0.5213,colsample_bytree=0.4603)
+##print(xgbFit)
+
+## Predictions
+preds2 <- predict(xgbFit,newdata=as.matrix(Validation[,-60]))
+xgbrmse<-rmse(Validation$SalePrice,preds2)
+```
+```{r,include=FALSE}
+names <- dimnames(as.matrix(Training[,-60]))[[2]]
+importance_matrix <- xgb.importance(names, model = xgbFit)
+xgb.plot.importance(importance_matrix)
+
+
+averagermse<-rmse(Validation$SalePrice,(preds+preds1+preds2)/3)
+
+weightedrmse<-rmse(Validation$SalePrice,(0.6*preds+0.1*preds1+0.3*preds2))
+
+
+```
+
+
+```{r ,out.width='80%'}
+models<-c("Lasso","GBM","XGBoost","Average","Weighted Average")
+RMSEs<-c(lassormse,gbmrmse,xgbrmse,averagermse,weightedrmse)
+rmsemodels<-as.data.frame(cbind(models,RMSEs))
+
+
+knitr::kable(rmsemodels, caption = 'Models RMSE',align = 'c',"html")
+```
+Among the models, Lasso performs the best. It actually performed much better than the other two models. Considering that the other two models are more advanced, it can be inferred that Lasso performs the best becasue of its feature selection ability. There are 220 features in total for the models. Therefore, XGBoost and gbm could overfit a lot due to the large amount of features. With more feature selection prior to feeding in to the two models, they may perform better. However, we can also see that the weighted averages performes the best. Thus, we decided to use that as out final model for predicting housing prices.
+
+
+
+
+
+
+```{r,out.width='80%', fig.align='center', fig.cap='True vs. Predicted', fig.height=5,warning=FALSE}
+
+pred123<-(0.6*preds+0.1*preds1+0.3*preds2)
+
+
+
+abc<- as.data.frame(cbind(Validation$SalePrice,pred123))
+colnames(abc)<-c("true","predicted")
+ggplot(data = abc,aes(x=true,y=predicted))+geom_point()+geom_abline(intercept=0,slope=1,size=20,alpha=0.4,colour="darkblue")+ylim(11,13)+xlim(11,13)+geom_abline(intercept=0,slope=1,size=1,alpha=1,colour="blue")
+```
+
+
+The generated graph shows the true sale price versus our predicted price. In general, the model did a good job in predicting the price. There are some observations that is severly wrong. However, most of the points fall in the blue region where the residual is acceptable.
+
+
+
+# Conclusion
+
+During the process of building our model, we discovered that quality and year are the two biggest factors. Interestingly, garage are very important, and basement as well as second floor area is more important than first floor. In addition, the neiborhood does not have too much influence on sale price. 
+Our model yielded a RMSE of 0.115341, which is lower than the individual models, 
+
+
+# Limitations and Recommendations
+
+The data we are given is only collected in one city in a short amount of time. Therefore, it does not have too much value for predicting prices in other cities. In addition, it does not reflect much fluctuation, nor valuable for predicting prices some time in the future. Thus, it is necessary to conduct more research and modeling on multiple cities during multiple times, to make the data and models more flexible and comprehensive.
